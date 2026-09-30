@@ -41,29 +41,6 @@ python3 mpn.py                        # https://<host>:8443
 
 A systemd unit and an install guide for Rocky Linux / RHEL are in [standalone/](standalone/).
 
-## Repository layout
-
-```
-repository.yaml                 Home Assistant app repository info
-my_private_network/
-  config.yaml                   App definition, options and schema
-  Dockerfile                    Image build (HA base image + Python)
-  mpn.py                        The application
-  translations/                 Option labels (en, de)
-  DOCS.md, README.md, CHANGELOG.md, icon.png, logo.png
-standalone/                     systemd unit and guide for plain Linux hosts
-.github/workflows/check.yaml    Checks and test build (both architectures) on every push
-.github/check_app.py            Config/translation consistency check (run locally too)
-```
-
-## Releasing a new version
-
-1. Change the code in `my_private_network/`
-2. Raise `version` in `my_private_network/config.yaml` and `VERSION` in `mpn.py`
-3. Add an entry to `CHANGELOG.md`, commit and push
-
-Home Assistant then offers the update.
-
 ## License
 
 MIT, see [LICENSE](LICENSE).
