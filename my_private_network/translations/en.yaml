@@ -1,0 +1,50 @@
+configuration:
+  default_network_name:
+    name: Default network name
+    description: >-
+      Name of the network created on the very first start. Later changes are
+      made in the app itself under "Networks".
+  default_network_cidr:
+    name: Default network range
+    description: >-
+      IPv4 range of the first network in CIDR notation, e.g. 192.168.0.0/24.
+      Only used on the very first start.
+  types:
+    name: Device types
+    description: Suggestions for the "Type" field. Free text is still allowed.
+  ping_enabled:
+    name: Ping status
+    description: Show a green or red dot in front of each IP depending on whether it answers ping.
+  ping_timeout:
+    name: Ping timeout (seconds)
+    description: How long to wait for a ping answer per address.
+  ping_refresh_seconds:
+    name: Ping refresh (seconds)
+    description: How often the open page refreshes the ping status.
+  session_timeout_minutes:
+    name: Session timeout (minutes)
+    description: Idle time until a user of the direct port has to sign in again.
+  direct_access_users:
+    name: Direct access users
+    description: >-
+      Users for the optional direct port (see Network). Not needed when you
+      only use the sidebar, where Home Assistant handles the login.
+    fields:
+      username:
+        name: Username
+      password:
+        name: Password
+  direct_ssl:
+    name: HTTPS on the direct port
+    description: Use the certificate below from the /ssl folder for the direct port.
+  certfile:
+    name: Certificate file
+    description: File name in /ssl, e.g. fullchain.pem.
+  keyfile:
+    name: Private key file
+    description: File name in /ssl, e.g. privkey.pem.
+  log_level:
+    name: Log level
+    description: Detail of the app log.
+network:
+  8443/tcp: Optional direct web access with its own login. Leave empty to use only the sidebar.

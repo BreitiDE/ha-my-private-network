@@ -1,0 +1,50 @@
+configuration:
+  default_network_name:
+    name: Name des Standardnetzes
+    description: >-
+      Name des Netzes, das beim allerersten Start angelegt wird. Spätere
+      Änderungen machst du in der App selbst unter "Networks".
+  default_network_cidr:
+    name: IP-Bereich des Standardnetzes
+    description: >-
+      IPv4-Bereich des ersten Netzes in CIDR-Schreibweise, z. B. 192.168.0.0/24.
+      Wird nur beim allerersten Start verwendet.
+  types:
+    name: Gerätetypen
+    description: Vorschläge für das Feld "Type". Freier Text ist trotzdem möglich.
+  ping_enabled:
+    name: Ping-Status
+    description: Grüner oder roter Punkt vor jeder IP, je nachdem ob sie auf Ping antwortet.
+  ping_timeout:
+    name: Ping-Timeout (Sekunden)
+    description: Wartezeit auf eine Ping-Antwort pro Adresse.
+  ping_refresh_seconds:
+    name: Ping-Aktualisierung (Sekunden)
+    description: Wie oft die geöffnete Seite den Ping-Status aktualisiert.
+  session_timeout_minutes:
+    name: Sitzungs-Timeout (Minuten)
+    description: Leerlaufzeit, nach der Benutzer des direkten Ports sich neu anmelden müssen.
+  direct_access_users:
+    name: Benutzer für direkten Zugriff
+    description: >-
+      Benutzer für den optionalen direkten Port (siehe Netzwerk). Nicht nötig,
+      wenn du nur die Seitenleiste nutzt, dort übernimmt Home Assistant den Login.
+    fields:
+      username:
+        name: Benutzername
+      password:
+        name: Passwort
+  direct_ssl:
+    name: HTTPS auf dem direkten Port
+    description: Verwendet das unten angegebene Zertifikat aus dem Ordner /ssl für den direkten Port.
+  certfile:
+    name: Zertifikatsdatei
+    description: Dateiname in /ssl, z. B. fullchain.pem.
+  keyfile:
+    name: Schlüsseldatei
+    description: Dateiname in /ssl, z. B. privkey.pem.
+  log_level:
+    name: Log-Level
+    description: Detailgrad des App-Logs.
+network:
+  8443/tcp: Optionaler direkter Webzugriff mit eigenem Login. Leer lassen, wenn nur die Seitenleiste genutzt wird.

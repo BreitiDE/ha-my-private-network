@@ -1,0 +1,22 @@
+[Unit]
+Description=My Private Network (IP address manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mpn
+Group=mpn
+WorkingDirectory=/opt/mpn
+ExecStart=/usr/bin/python3 /opt/mpn/mpn.py --config /opt/mpn/config.json
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mpn
+
+[Install]
+WantedBy=multi-user.target
