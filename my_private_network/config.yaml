@@ -41,6 +41,7 @@ options:
     - Laptop
     - Phone
     - Tablet
+    - Smarthome
     - Printer
     - Camera
     - IoT
