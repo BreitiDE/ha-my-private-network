@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1
+
+- Adding and editing addresses opens an overlay on top of the list instead of a separate page
+- Validation errors are shown inside the overlay; nothing is lost while you correct them
+- Delete, Cancel, close with Esc, the × button or a click next to the overlay
+- The overlay also works from the scan report
+- Repository URL set to github.com/BreitiDE/ha-my-private-network
+
 ## 1.3.0
 
 - New color design, shared with Stream Recorder: accent #ce6c00, warm neutral grays, light and dark mode

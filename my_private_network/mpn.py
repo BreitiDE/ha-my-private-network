@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "My Private Network"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -797,6 +797,7 @@ ICONS = {
     "logo": '<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/>'
             '<rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v6M5 16v-2h14v2"/>',
     "plus": '<path d="M12 5v14M5 12h14"/>',
+    "x": '<path d="M6 6l12 12M18 6L6 18"/>',
     "edit": '<path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3"/><path d="M13.5 6.5l3 3"/>',
     "trash": '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
     "download": '<path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 11l5 5 5-5M12 4v12"/>',
@@ -837,13 +838,13 @@ CSS = """
 --good:#0ca30c;--good-bg:rgba(12,163,12,.12);--good-text:#086b08;
 --warning:#fab219;--warn-bg:rgba(250,178,25,.18);--warn-text:#7a5200;
 --critical:#d03b3b;--crit-bg:rgba(208,59,59,.12);--crit-text:#a62a2a;
---code-bg:rgba(11,11,11,.05);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+--code-bg:rgba(11,11,11,.05);--shadow:0 12px 40px rgba(0,0,0,.18);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 @media (prefers-color-scheme:dark){:root{color-scheme:dark;
 --page:#0d0d0d;--surface:#1a1a19;--field:#232322;--ink:#f0efec;--ink-2:#c3c2b7;--muted:#9a998f;
 --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);--field-border:rgba(255,255,255,.20);--hover:rgba(255,255,255,.05);
 --accent-text:#e09156;--accent-soft:rgba(206,108,0,.18);--track:#262624;
 --good-bg:rgba(12,163,12,.18);--good-text:#6fd36f;--warn-bg:rgba(250,178,25,.16);--warn-text:#f5c860;
---crit-bg:rgba(208,59,59,.18);--crit-text:#f08a8a;--code-bg:rgba(255,255,255,.07)}}
+--crit-bg:rgba(208,59,59,.18);--crit-text:#f08a8a;--code-bg:rgba(255,255,255,.07);--shadow:0 12px 40px rgba(0,0,0,.6)}}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);color:var(--ink)}
 a{color:var(--accent-text);text-decoration:none}
@@ -937,6 +938,21 @@ h2 .count{font-size:11px;font-weight:600;color:var(--ink-2);background:var(--tra
 .badge.warn{background:var(--warn-bg);color:var(--warn-text);border-color:transparent;font-weight:600;font-family:var(--mono)}
 .badge.ok{background:var(--good-bg);color:var(--good-text);border-color:transparent;font-weight:600;font-family:var(--mono)}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:0 0 24px}
+dialog{border:1px solid var(--border);border-radius:12px;padding:0;background:var(--surface);color:var(--ink);box-shadow:var(--shadow);
+width:min(640px,calc(100vw - 24px));max-height:calc(100vh - 32px)}
+dialog::backdrop{background:rgba(11,11,11,.4)}
+dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 34px);margin:0}
+.dlg-head{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--grid)}
+.dlg-head h2{margin:0;font-size:16px}
+.dlg-head .hint{margin:2px 0 0}
+.dlg-head .x{margin-left:auto}
+.dlg-body{padding:16px 20px 4px;overflow:auto}
+.dlg-foot{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--grid)}
+.dlg-foot .grow{margin-right:auto}
+.icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--ink-2);
+cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0}
+.icon-btn:hover{background:var(--hover);color:var(--ink)}
+[hidden]{display:none!important}
 """
 
 COMMON_JS = """
@@ -977,6 +993,38 @@ function poll(){fetch('api/scan/'+n,{credentials:'same-origin'}).then(function(r
   if(d.state!=='running'){location.reload();return;}setTimeout(poll,1000);})
  .catch(function(){setTimeout(poll,3000);});}
 poll();})();
+"""
+
+HOST_JS = """
+(function(){
+var dlg=document.getElementById('hostDlg');if(!dlg||!dlg.showModal)return;
+var f=document.getElementById('hostForm'),df=document.getElementById('hostDel'),nid=dlg.getAttribute('data-net');
+var err=document.getElementById('hostErr'),title=document.getElementById('hostTitle'),meta=document.getElementById('hostMeta');
+var el=f.elements,del=document.getElementById('hostDelBtn'),save=document.getElementById('hostSave');
+function showErr(list){err.innerHTML='';var u=document.createElement('ul');
+ list.forEach(function(t){var li=document.createElement('li');li.textContent=t;u.appendChild(li);});
+ err.appendChild(document.createTextNode('Please fix the following:'));err.appendChild(u);err.hidden=false;}
+function open(h){f.reset();err.hidden=true;save.disabled=false;
+ el.hid.value=h?h.id:'';el.ip.value=h?h.ip:(dlg.getAttribute('data-next')||'');el.mac.value=h?h.mac:'';
+ el.name.value=h?h.name:'';el.type.value=h?h.type:'';el.description.value=h?h.description:'';
+ title.textContent=h?'Edit address':'Add address';
+ meta.textContent=h?(h.ip+(h.modified?' · last changed '+h.modified:'')):dlg.getAttribute('data-sub');
+ del.hidden=!h;if(h){df.action='net/'+nid+'/host/'+h.id+'/delete';df.setAttribute('data-confirm','Delete '+h.ip+' ('+h.name+')?');}
+ dlg.showModal();(h?el.name:el.ip).focus();}
+document.addEventListener('click',function(ev){
+ var a=ev.target.closest('[data-edit],[data-add]');if(!a||ev.ctrlKey||ev.metaKey||ev.shiftKey||ev.button)return;
+ ev.preventDefault();
+ if(a.hasAttribute('data-add')){open(null);return;}
+ fetch('api/host/'+nid+'/'+a.getAttribute('data-edit'),{credentials:'same-origin'})
+  .then(function(r){if(!r.ok)throw r;return r.json();}).then(open).catch(function(){location.href=a.href;});});
+f.addEventListener('submit',function(ev){ev.preventDefault();save.disabled=true;
+ var body=new URLSearchParams(new FormData(f));body.set('ajax','1');
+ fetch(f.action,{method:'POST',body:body,credentials:'same-origin'})
+  .then(function(r){return r.json();})
+  .then(function(d){if(d.ok){location.reload();return;}showErr(d.errors||['Could not save.']);save.disabled=false;})
+  .catch(function(){showErr(['Could not save. Reload the page and try again.']);save.disabled=false;});});
+dlg.addEventListener('click',function(ev){if(ev.target===dlg||ev.target.closest('[data-close]'))dlg.close();});
+})();
 """
 
 IMPORT_JS = """
@@ -1062,6 +1110,7 @@ ROUTES = [
     ("POST", r"/net/(\w+)/scan", "scan_start"),
     ("GET", r"/net/(\w+)/scan", "scan_view"),
     ("GET", r"/api/ping/(\w+)", "api_ping"),
+    ("GET", r"/api/host/(\w+)/(\w+)", "api_host"),
     ("GET", r"/api/scan/(\w+)", "api_scan"),
 ]
 PUBLIC = {"favicon", "login_form", "login"}
@@ -1337,7 +1386,7 @@ class Handler(BaseHTTPRequestHandler):
                 '<td class="muted desc" data-v="%s">%s</td>'
                 '<td class="muted nowrap" data-v="%s">%s</td>'
                 '<td class="actions">'
-                '<a class="btn small" href="net/%s/host/%s" title="Edit" aria-label="Edit">%s</a> '
+                '<a class="btn small" href="net/%s/host/%s" data-edit="%s" title="Edit" aria-label="Edit">%s</a> '
                 '<form class="inline" method="post" action="net/%s/host/%s/delete" data-confirm="%s">%s'
                 '<button class="btn small danger" type="submit" title="Delete" aria-label="Delete">%s</button>'
                 '</form></td></tr>' % (
@@ -1347,7 +1396,7 @@ class Handler(BaseHTTPRequestHandler):
                     e(h.get("type", "").lower()), type_html,
                     e(h.get("description", "").lower()), e(h.get("description", "")),
                     e(h.get("modified", "")), e(fmt_dt(h.get("modified"))),
-                    e(nid), e(h["id"]), icon("edit"),
+                    e(nid), e(h["id"]), e(h["id"]), icon("edit"),
                     e(nid), e(h["id"]), e("Delete %s (%s)?" % (h["ip"], h["name"])),
                     self.csrf_input(), icon("trash")))
 
@@ -1362,7 +1411,7 @@ class Handler(BaseHTTPRequestHandler):
                 % "".join(rows))
         else:
             table = ('<div class="card empty">No addresses assigned in this network yet.<br><br>'
-                     '<a class="btn primary" href="net/%s/host/new">%s Add address</a> %s</div>'
+                     '<a class="btn primary" href="net/%s/host/new" data-add>%s Add address</a> %s</div>'
                      % (e(nid), icon("plus"), self.scan_button(net, "btn")))
 
         last_scan = ""
@@ -1396,7 +1445,7 @@ class Handler(BaseHTTPRequestHandler):
             '</div>'
             '<div class="toolbar"><div class="search">%s<input id="q" type="search" '
             'placeholder="Search IP, MAC, name, type, description" autocomplete="off"></div>'
-            '<a class="btn primary" href="net/%s/host/new">%s Add address</a>'
+            '<a class="btn primary" href="net/%s/host/new" data-add>%s Add address</a>'
             '%s'
             '<a class="btn" href="net/%s/export.csv">%s Export CSV</a>'
             '<a class="btn" href="net/%s/import">%s Import CSV</a></div>%s%s' % (
@@ -1406,11 +1455,11 @@ class Handler(BaseHTTPRequestHandler):
                 e(next_free) if next_free else "&mdash;",
                 icon("search"), e(nid), icon("plus"), self.scan_button(net, "btn"),
                 e(nid), icon("download"), e(nid), icon("upload"),
-                last_scan, table))
+                last_scan, table)) + self.host_dialog(net, next_free)
         self.sess["last_net"] = nid
         refresh = int(APP.cfg.get("ping", {}).get("refresh_seconds", 60))
         self.render(net["name"], content, nid, 'data-net="%s" data-refresh="%d"' % (e(nid), refresh),
-                    NET_JS if rows else "")
+                    (NET_JS if rows else "") + HOST_JS)
 
     # -- hosts -----------------------------------------------------------
 
@@ -1448,6 +1497,45 @@ class Handler(BaseHTTPRequestHandler):
                 datalist, e(values.get("description", "")), e(net["id"])))
         self.render(title, content, net["id"], status=status)
 
+    def host_dialog(self, net, next_free=None):
+        """Overlay for adding/editing an address (filled in by HOST_JS)."""
+        types = APP.cfg.get("types", [])
+        datalist = "".join('<option value="%s">' % e(t) for t in types)
+        n = ipaddress.IPv4Network(net["cidr"])
+        first = n.network_address + (0 if n.prefixlen >= 31 else 1)
+        last = n.broadcast_address - (0 if n.prefixlen >= 31 else 1)
+        if next_free is None:
+            next_free = APP.store.next_free(net["id"])
+        return (
+            '<dialog id="hostDlg" aria-labelledby="hostTitle" data-net="%s" data-next="%s" data-sub="%s">'
+            '<form id="hostForm" class="dlg" method="post" action="net/%s/host/save">%s'
+            '<input type="hidden" name="hid">'
+            '<div class="dlg-head"><div><h2 id="hostTitle">Edit address</h2><div class="hint" id="hostMeta"></div></div>'
+            '<button class="icon-btn x" type="button" data-close aria-label="Close" title="Close (Esc)">%s</button></div>'
+            '<div class="dlg-body"><div class="flash error" id="hostErr" role="alert" hidden></div>'
+            '<div class="grid2">'
+            '<div class="field"><label for="d-ip">IP address *</label>'
+            '<input id="d-ip" name="ip" class="mono" required autocomplete="off">'
+            '<div class="hint">Usable range %s &ndash; %s</div></div>'
+            '<div class="field"><label for="d-mac">MAC address</label>'
+            '<input id="d-mac" name="mac" class="mono" placeholder="AA:BB:CC:DD:EE:FF" autocomplete="off">'
+            '<div class="hint">Any format, will be normalized</div></div>'
+            '<div class="field"><label for="d-name">Name *</label>'
+            '<input id="d-name" name="name" required maxlength="64" placeholder="nas01" autocomplete="off"></div>'
+            '<div class="field"><label for="d-type">Type</label>'
+            '<input id="d-type" name="type" list="d-types" maxlength="32" placeholder="Server" autocomplete="off">'
+            '<datalist id="d-types">%s</datalist></div></div>'
+            '<div class="field"><label for="d-description">Description</label>'
+            '<textarea id="d-description" name="description" rows="3" maxlength="1000"></textarea></div></div>'
+            '<div class="dlg-foot"><span class="grow"><button class="btn danger" type="submit" form="hostDel" '
+            'id="hostDelBtn">%s Delete</button></span>'
+            '<button class="btn" type="button" data-close>Cancel</button>'
+            '<button class="btn primary" type="submit" id="hostSave">Save</button></div></form>'
+            '<form id="hostDel" method="post">%s</form></dialog>'
+            % (e(net["id"]), e(next_free or ""), e("%s · %s" % (net["name"], net["cidr"])),
+               e(net["id"]), self.csrf_input(), icon("x"), first, last, datalist,
+               icon("trash"), self.csrf_input()))
+
     def r_host_new(self, nid):
         net = APP.store.network(nid)
         if not net:
@@ -1466,13 +1554,18 @@ class Handler(BaseHTTPRequestHandler):
         if not net:
             return self.not_found()
         hid = self.form.get("hid") or None
+        ajax = self.form.get("ajax") == "1"
         host, errors, warnings = APP.store.save_host(nid, hid, self.form)
         if errors:
+            if ajax:
+                return self.send_json({"ok": False, "errors": errors})  # validation, not a transport error
             return self.host_form(net, self.form, hid, errors, 400)
         for warning in warnings:
             self.flash("warn", e(warning))
         self.flash("ok", "Saved <strong>%s</strong> (%s)." % (e(host["ip"]), e(host["name"])))
         self.audit("%s %s (%s) in %s", "updated" if hid else "added", host["ip"], host["name"], net["name"])
+        if ajax:
+            return self.send_json({"ok": True, "id": host["id"]})
         self.redirect("/net/%s" % nid)
 
     def r_host_delete(self, nid, hid):
@@ -1657,8 +1750,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _edit_link(self, nid, hid):
         if APP.store.host(nid, hid):
-            return ('<td class="actions"><a class="btn small" href="net/%s/host/%s" title="Edit" '
-                    'aria-label="Edit">%s</a></td>' % (e(nid), e(hid), icon("edit")))
+            return ('<td class="actions"><a class="btn small" href="net/%s/host/%s" data-edit="%s" title="Edit" '
+                    'aria-label="Edit">%s</a></td>' % (e(nid), e(hid), e(hid), icon("edit")))
         return '<td class="actions muted">deleted</td>'
 
     def r_scan_view(self, nid):
@@ -1754,7 +1847,8 @@ class Handler(BaseHTTPRequestHandler):
         if not sections:
             sections.append('<div class="card empty">Everything matches: no new devices and no deviations.</div>')
 
-        self.render("Network scan", head + error + summary + "".join(sections), nid)
+        self.render("Network scan", head + error + summary + "".join(sections) + self.host_dialog(net), nid,
+                    'data-net="%s"' % e(nid), HOST_JS)
 
     # -- API -------------------------------------------------------------
 
@@ -1763,6 +1857,14 @@ class Handler(BaseHTTPRequestHandler):
         if not job:
             return self.send_json({"state": "none"})
         self.send_json({k: job[k] for k in ("state", "phase", "done", "total", "error")})
+
+    def r_api_host(self, nid, hid):
+        host = APP.store.host(nid, hid)
+        if not host:
+            return self.send_json({"error": "not found"}, 404)
+        data = {k: host.get(k, "") for k in ("id",) + HOST_FIELDS}
+        data["modified"] = fmt_dt(host.get("modified"))
+        self.send_json(data)
 
     def r_api_ping(self, nid):
         if not APP.store.network(nid):

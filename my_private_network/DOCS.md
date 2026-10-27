@@ -8,8 +8,13 @@ Manage the IP addresses of your home network directly in Home Assistant.
 - Green/red dot in front of each IP showing whether it answers ping
 - Several networks (e.g. LAN, IoT VLAN, guest), selectable at the top
 - "Next free address" suggestion, search and sortable columns
+- Network scan that adds new devices automatically and reports deviations
 - CSV export and import (merge or replace)
 - Opens in the Home Assistant sidebar; Home Assistant handles the login
+
+## Editing addresses
+
+**Add address** and the pencil icon open an overlay on top of the list. Save, Cancel and Delete are at the bottom; Esc or a click next to the overlay closes it without saving. If something is wrong (for example an IP that is already taken), the message appears in the overlay and your input stays as it is.
 
 ## Getting started
 
@@ -57,6 +62,21 @@ ip,mac,name,type,description,modified
 - Comma, semicolon or tab separated, UTF-8.
 - **Merge** adds new IPs and updates existing ones. **Replace** empties the network first.
 - If any row is invalid, nothing is imported and every error is listed.
+
+## Network scan
+
+**Scan network** on the list pings every address of the network once (a /24 takes a few seconds). The scan runs in the background; you can leave the page.
+
+- **New devices** that answer are added automatically. The name comes from reverse DNS (e.g. the names your router hands out), otherwise `unknown-<ip>`. The description is set to "Found by network scan".
+- **Deviations** are only reported, never changed:
+  - *MAC address changed*: another MAC answers at a recorded IP
+  - *New address with a known MAC*: a recorded device also answers at a new IP
+  - *Recorded but not answering*: the device is off, asleep or blocks ping
+- The report of the last scan stays available under **View report** on the list.
+
+**MAC addresses in Home Assistant:** the app runs in Home Assistant's isolated container network, so it cannot see the MAC addresses of your devices. Scanned devices are added without MAC; enter it by hand if you need it. (The standalone version on a Linux host in the same network fills in MAC addresses automatically.)
+
+Networks larger than 4096 addresses (/20) cannot be scanned.
 
 ## Data and backup
 
