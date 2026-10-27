@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "My Private Network"
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -567,10 +567,66 @@ class Store:
             self._save()
         return result
 
+    def apply_scan(self, nid, alive, macs, names, user, duration):
+        """Merge a scan result into the network and store the report.
+
+        alive: list of IPs that answered ping; macs/names: ip -> value.
+        New IPs are added, empty MACs of existing entries are filled in,
+        everything else is only reported.
+        """
+        with self.lock:
+            net = self._net(nid)
+            if not net:
+                raise ValueError("Network not found.")
+            n = ipaddress.IPv4Network(net["cidr"])
+            hosts = [h for h in self.data["hosts"] if h["network_id"] == nid]
+            existing = {h["ip"]: h for h in hosts}
+            mac_owner = {h["mac"]: h for h in hosts if h.get("mac")}
+            alive_set = set(alive)
+            now = now_iso()
+            report = {"alive": len(alive), "macs_seen": 0, "added": [], "mac_filled": [],
+                      "mac_changed": [], "mac_elsewhere": [], "missing": []}
+            for ip in sorted(alive, key=lambda x: int(ipaddress.IPv4Address(x))):
+                if not usable(n, ipaddress.IPv4Address(ip)):
+                    continue
+                mac = macs.get(ip, "")
+                if mac:
+                    report["macs_seen"] += 1
+                host = existing.get(ip)
+                if host is None:
+                    entry = dict(id=new_id(), network_id=nid, ip=ip, mac=mac,
+                                 name=(names.get(ip) or "unknown-%s" % ip)[:64], type="",
+                                 description="Found by network scan", modified=now)
+                    self.data["hosts"].append(entry)
+                    report["added"].append({"id": entry["id"], "ip": ip, "mac": mac, "name": entry["name"]})
+                    other = mac_owner.get(mac) if mac else None
+                    if other:
+                        report["mac_elsewhere"].append({"id": entry["id"], "ip": ip, "mac": mac,
+                                                        "other_ip": other["ip"], "other_name": other["name"]})
+                    elif mac:
+                        mac_owner[mac] = entry
+                elif mac and not host.get("mac"):
+                    host["mac"] = mac
+                    host["modified"] = now
+                    report["mac_filled"].append({"id": host["id"], "ip": ip, "mac": mac, "name": host["name"]})
+                elif mac and host.get("mac") != mac:
+                    report["mac_changed"].append({"id": host["id"], "ip": ip, "name": host["name"],
+                                                  "stored": host["mac"], "seen": mac})
+            for host in sorted(hosts, key=lambda h: int(ipaddress.IPv4Address(h["ip"]))):
+                if host["ip"] not in alive_set:
+                    report["missing"].append({"id": host["id"], "ip": host["ip"], "name": host["name"]})
+            net["last_scan"] = {"time": now, "user": user, "duration": round(duration, 1), "report": report}
+            self._save()
+            return report
+
 
 # --------------------------------------------------------------------------
-# Ping
+# Ping and network scan
 # --------------------------------------------------------------------------
+
+ARP_FILE = os.environ.get("MPN_ARP_FILE", "/proc/net/arp")  # override only for tests
+SCAN_MAX_ADDRESSES = 4096
+DNS_TIMEOUT = 8
 
 class Pinger:
     def __init__(self, cfg):
@@ -610,6 +666,125 @@ class Pinger:
                 self.cache[ip] = (time.time(), ok)
         return results
 
+    def remember(self, results):
+        now = time.time()
+        with self.lock:
+            for ip, ok in results.items():
+                self.cache[ip] = (now, ok)
+
+
+def read_arp_table():
+    """IP -> MAC from the kernel neighbour table (complete entries only)."""
+    table = {}
+    try:
+        with open(ARP_FILE, encoding="ascii", errors="replace") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) < 4 or parts[2] == "0x0" or parts[3] == "00:00:00:00:00:00":
+                    continue
+                try:
+                    table[parts[0]] = normalize_mac(parts[3])
+                except ValueError:
+                    pass
+    except OSError as ex:
+        log.debug("Cannot read %s: %s", ARP_FILE, ex)
+    return table
+
+
+def _reverse_name(ip):
+    try:
+        name = socket.gethostbyaddr(ip)[0]
+    except (OSError, UnicodeError):
+        return None
+    short = name.rstrip(".").split(".")[0]
+    if not short or short == ip or short.lower() == "localhost" or re.fullmatch(r"[\d-]+", short):
+        return None
+    return short
+
+
+class Scanner:
+    """Runs one background scan per network and keeps its progress."""
+
+    def __init__(self, store, pinger):
+        self.store = store
+        self.pinger = pinger
+        self.jobs = {}
+        self.lock = threading.Lock()
+        self.dns_pool = ThreadPoolExecutor(max_workers=16)
+
+    @property
+    def available(self):
+        return bool(self.pinger.binary)
+
+    def status(self, nid):
+        with self.lock:
+            job = self.jobs.get(nid)
+            return dict(job) if job else None
+
+    def start(self, nid, user):
+        """Returns (job, started). Does not start a second scan of the same network."""
+        with self.lock:
+            job = self.jobs.get(nid)
+            if job and job["state"] == "running":
+                return dict(job), False
+            job = {"state": "running", "phase": "Pinging", "done": 0, "total": 0,
+                   "user": user, "started": time.time(), "error": None}
+            self.jobs[nid] = job
+        threading.Thread(target=self._run, args=(nid, job), name="scan-" + nid, daemon=True).start()
+        return dict(job), True
+
+    def _set(self, job, **values):
+        with self.lock:
+            job.update(values)
+
+    def _run(self, nid, job):
+        try:
+            net = self.store.network(nid)
+            if not net:
+                raise ValueError("Network not found.")
+            n = ipaddress.IPv4Network(net["cidr"])
+            ips = [str(ip) for ip in (n.hosts() if n.prefixlen < 31 else n)]
+            self._set(job, total=len(ips))
+            log.info("[%s] scanning %s (%s, %d addresses)", job["user"], net["name"], net["cidr"], len(ips))
+
+            def probe(ip):
+                ok = self.pinger._ping(ip)
+                with self.lock:
+                    job["done"] += 1
+                return ip, ok
+
+            results = dict(self.pinger.pool.map(probe, ips))
+            self.pinger.remember(results)
+            alive = [ip for ip, ok in results.items() if ok]
+
+            self._set(job, phase="Reading MAC addresses")
+            arp = read_arp_table()
+            macs = {ip: arp[ip] for ip in alive if ip in arp}
+
+            self._set(job, phase="Resolving names")
+            futures = {ip: self.dns_pool.submit(_reverse_name, ip) for ip in alive}
+            deadline = time.time() + DNS_TIMEOUT
+            names = {}
+            for ip, future in futures.items():
+                try:
+                    name = future.result(timeout=max(0.1, deadline - time.time()))
+                except Exception:
+                    name = None
+                if name:
+                    names[ip] = name
+
+            report = self.store.apply_scan(nid, alive, macs, names, job["user"],
+                                           time.time() - job["started"])
+            log.info("[%s] scan of %s finished: %d answering, %d added, %d MAC filled, "
+                     "%d MAC changed, %d not answering", job["user"], net["name"], report["alive"],
+                     len(report["added"]), len(report["mac_filled"]), len(report["mac_changed"]),
+                     len(report["missing"]))
+            self._set(job, state="done", phase="Done")
+        except Exception as ex:
+            log.exception("Scan of network %s failed", nid)
+            self._set(job, state="error", phase="Failed", error=str(ex) or ex.__class__.__name__)
+
 
 # --------------------------------------------------------------------------
 # HTML
@@ -630,6 +805,7 @@ ICONS = {
               '<path d="M9 12h12l-3-3M18 15l3-3"/>',
     "layers": '<path d="M12 4l8 4-8 4-8-4 8-4M4 12l8 4 8-4M4 16l8 4 8-4"/>',
     "search": '<circle cx="10" cy="10" r="7"/><path d="M21 21l-6-6"/>',
+    "radar": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6.5-6.5"/>',
     "user": '<circle cx="12" cy="8" r="4"/><path d="M6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/>',
 }
 
@@ -641,84 +817,125 @@ def icon(name, size=16):
     return svg
 
 
-FAVICON = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#2f6fed" '
-           'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">%s</svg>' % ICONS["logo"])
+# Brand mark: accent square with dark network glyph (same style as Stream Recorder)
+_BRAND = ('<rect width="32" height="32" rx="7" fill="#ce6c00"/>'
+          '<g transform="translate(5 5) scale(.9167)" fill="none" stroke="#0b0b0b" stroke-width="2.4" '
+          'stroke-linecap="round" stroke-linejoin="round">%s</g>' % ICONS["logo"])
+FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">%s</svg>' % _BRAND
+
+
+def brand_mark(size):
+    return ('<svg class="logo" width="%d" height="%d" viewBox="0 0 32 32" aria-hidden="true">%s</svg>'
+            % (size, size, _BRAND))
 
 CSS = """
-:root{--bg:#f4f6fa;--card:#fff;--text:#1b2330;--muted:#687385;--border:#e2e7ef;--accent:#2f6fed;
---accent-bg:#eaf0ff;--danger:#cf3b3b;--danger-bg:#fdecec;--ok:#1d9a52;--ok-bg:#e3f5ea;--warn:#a86a0c;
---warn-bg:#fdf3e1;--radius:12px;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-@media (prefers-color-scheme:dark){:root{--bg:#0f141b;--card:#171e28;--text:#e5eaf1;--muted:#8d99aa;
---border:#273142;--accent:#6c9cff;--accent-bg:#1c2944;--danger:#ff7a7a;--danger-bg:#3a1d20;--ok:#4fd083;
---ok-bg:#15301f;--warn:#f1b650;--warn-bg:#35290f}}
+/* Color system: FARBDESIGN.md (same as Stream Recorder), accent #ce6c00 */
+:root{color-scheme:light;
+--page:#f9f9f7;--surface:#fcfcfb;--field:#ffffff;--ink:#0b0b0b;--ink-2:#52514e;--muted:#6b6a65;
+--grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);--field-border:rgba(11,11,11,.20);--hover:rgba(11,11,11,.04);
+--accent:#ce6c00;--accent-text:#a45502;--on-accent:#0b0b0b;--accent-soft:rgba(206,108,0,.12);--track:#f0efec;
+--good:#0ca30c;--good-bg:rgba(12,163,12,.12);--good-text:#086b08;
+--warning:#fab219;--warn-bg:rgba(250,178,25,.18);--warn-text:#7a5200;
+--critical:#d03b3b;--crit-bg:rgba(208,59,59,.12);--crit-text:#a62a2a;
+--code-bg:rgba(11,11,11,.05);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;
+--page:#0d0d0d;--surface:#1a1a19;--field:#232322;--ink:#f0efec;--ink-2:#c3c2b7;--muted:#9a998f;
+--grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);--field-border:rgba(255,255,255,.20);--hover:rgba(255,255,255,.05);
+--accent-text:#e09156;--accent-soft:rgba(206,108,0,.18);--track:#262624;
+--good-bg:rgba(12,163,12,.18);--good-text:#6fd36f;--warn-bg:rgba(250,178,25,.16);--warn-text:#f5c860;
+--crit-bg:rgba(208,59,59,.18);--crit-text:#f08a8a;--code-bg:rgba(255,255,255,.07)}}
 *{box-sizing:border-box}
-body{margin:0;font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
-a{color:var(--accent);text-decoration:none}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);color:var(--ink)}
+a{color:var(--accent-text);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .i{vertical-align:-3px;flex-shrink:0}
-header{background:var(--card);border-bottom:1px solid var(--border)}
-.bar{max-width:1240px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;color:var(--text)}
-.brand .i{color:var(--accent)}
+header{background:var(--surface);border-bottom:1px solid var(--border)}
+.bar{max-width:1280px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:18px;color:var(--ink)}
+.brand:hover{text-decoration:none}
+.logo{flex:none;display:block}
 .spacer{flex:1}
-.user{color:var(--muted);font-size:14px;display:flex;align-items:center;gap:6px}
-main{max-width:1240px;margin:0 auto;padding:24px 20px 48px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
-.head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
-h1{font-size:22px;margin:0;font-weight:650}
-.sub{color:var(--muted);font-size:14px;width:100%;margin-top:-6px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:18px}
-.stat{padding:14px 16px}.stat .l{font-size:13px;color:var(--muted)}.stat .v{font-size:24px;font-weight:650;margin-top:2px}
-.stat .v.mono{font-size:19px}
-.meter{height:6px;background:var(--border);border-radius:9px;margin-top:8px;overflow:hidden}
-.meter span{display:block;height:100%;background:var(--accent)}
-.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-.search{position:relative;flex:1;min-width:220px}.search .i{position:absolute;left:11px;top:11px;color:var(--muted)}
+.navlink{color:var(--ink-2);padding:8px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
+.navlink:hover{background:var(--hover);text-decoration:none}
+.navlink[aria-current=page]{background:var(--accent-soft);color:var(--accent-text);font-weight:600}
+.user{color:var(--ink-2);font-size:13px;display:flex;align-items:center;gap:6px}
+main{max-width:1280px;margin:0 auto;padding:20px 20px 48px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
+.head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+h1{font-size:20px;margin:0;font-weight:650}
+.sub{color:var(--ink-2);font-size:13px;width:100%;margin-top:-6px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:16px}
+.stat{padding:14px 16px}.stat .l{font-size:12px;color:var(--ink-2)}
+.stat .v{font-size:26px;font-weight:600;letter-spacing:-.02em;margin-top:2px;font-variant-numeric:tabular-nums}
+.stat .v.mono{font-size:19px;letter-spacing:0;padding-top:4px}
+.meter{height:6px;background:var(--track);border-radius:3px;margin-top:8px;overflow:hidden}
+.meter span{display:block;height:100%;background:var(--accent);border-radius:3px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+.search{position:relative;flex:1;min-width:220px}.search .i{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--muted)}
 .search input{width:100%;padding-left:34px}
-input,select,textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+input,select,textarea{font:inherit;font-size:14px;color:var(--ink);background:var(--field);border:1px solid var(--field-border);border-radius:8px;padding:8px 10px;min-height:38px}
+input[type=radio],input[type=checkbox]{accent-color:var(--accent);min-height:0;width:16px;height:16px;margin:0}
+input[type=file]{min-height:0;padding:6px}
 textarea{resize:vertical}
-input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--border);
-background:var(--card);color:var(--text);cursor:pointer;font:inherit;font-size:14px;line-height:1.2;white-space:nowrap}
-.btn:hover{border-color:var(--muted)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{filter:brightness(1.08)}
-.btn.danger{color:var(--danger)}.btn.danger:hover{border-color:var(--danger)}
-.btn.small{padding:6px 8px}
-.btn.block{width:100%;justify-content:center;padding:10px}
-.table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
-th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;white-space:nowrap}
-th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--text)}
-th[data-dir=asc]::after{content:" \\25B2";font-size:9px}th[data-dir=desc]::after{content:" \\25BC";font-size:9px}
+input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:9px 14px;min-height:38px;border-radius:8px;border:1px solid var(--border);
+background:var(--surface);color:var(--ink);cursor:pointer;font:inherit;line-height:1.2;white-space:nowrap}
+.btn:hover{background:var(--hover);text-decoration:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.primary:hover{background:var(--accent);filter:brightness(1.06)}
+.btn.danger{color:var(--crit-text)}
+.btn.small{padding:5px 10px;min-height:30px;font-size:13px}
+td .btn.small{width:32px;height:32px;padding:0;justify-content:center;color:var(--ink-2)}
+td .btn.small:hover{color:var(--ink)}
+td .btn.small.danger{color:var(--crit-text)}
+.btn.block{width:100%;justify-content:center;min-height:44px}
+.table-wrap{overflow-x:auto;padding:4px 16px 8px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--grid);vertical-align:middle}
+th{font-size:12px;color:var(--muted);font-weight:500;white-space:nowrap;border-bottom-color:var(--axis);padding-top:10px;padding-bottom:6px}
+th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--ink)}
+th[data-dir]{color:var(--ink);font-weight:600}
+th[data-dir=asc]::after{content:" \\2191"}th[data-dir=desc]::after{content:" \\2193"}
 tbody tr:last-child td{border-bottom:none}
-tbody tr:hover{background:var(--accent-bg)}
-.mono{font-family:var(--mono);font-size:13.5px}
+tbody tr:hover{background:var(--hover)}
+.mono{font-family:var(--mono);font-size:13px}
 .muted{color:var(--muted)}.nowrap{white-space:nowrap}
+td strong{font-weight:600}
 .desc{max-width:340px;white-space:pre-line}
-.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;background:var(--accent-bg);color:var(--accent);white-space:nowrap}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--border);margin-right:10px;vertical-align:1px;transition:background .3s}
-.dot.up{background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg)}
-.dot.down{background:var(--danger);box-shadow:0 0 0 3px var(--danger-bg)}
+.badge{display:inline-block;font-size:11px;padding:1px 6px;border-radius:4px;border:1px solid var(--border);color:var(--ink-2);white-space:nowrap}
+.head .badge{font-size:12px;padding:2px 8px;background:var(--accent-soft);border-color:transparent;color:var(--accent-text)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--axis);margin-right:10px;vertical-align:1px;transition:background .3s}
+.dot.up{background:var(--good)}
+.dot.down{background:var(--critical)}
 .actions{white-space:nowrap;text-align:right}
 form.inline{display:inline}
-.flash{padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:14px}
-.flash.ok{background:var(--ok-bg);color:var(--ok)}
-.flash.warn{background:var(--warn-bg);color:var(--warn)}
-.flash.error{background:var(--danger-bg);color:var(--danger)}
-.flash ul{margin:4px 0 0;padding-left:18px}
-.form{max-width:640px;padding:22px 24px}
-.field{margin-bottom:14px}.field label{display:block;font-size:13px;font-weight:600;margin-bottom:5px}
+.flash{padding:10px 14px;border-radius:12px;margin-bottom:14px;font-size:13px;font-weight:500}
+.flash.ok{background:var(--good-bg);color:var(--good-text)}
+.flash.warn{background:var(--warn-bg);color:var(--warn-text)}
+.flash.error{background:var(--crit-bg);color:var(--crit-text)}
+.flash ul{margin:4px 0 0;padding-left:18px;font-weight:400}
+.flash code{background:transparent;padding:0}
+.form{max-width:640px;padding:20px 22px}
+.field{margin-bottom:14px}.field label{display:block;font-size:13px;color:var(--ink-2);margin-bottom:6px}
 .field input,.field textarea,.field select{width:100%}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
 @media (max-width:600px){.grid2{grid-template-columns:1fr}}
-.hint{font-size:12.5px;color:var(--muted);margin-top:4px}
-.formbar{display:flex;gap:8px;margin-top:6px}
-.login{max-width:370px;margin:12vh auto 0;padding:30px 28px}
-.login .brand{justify-content:center;margin-bottom:22px;font-size:19px}
-.empty{padding:48px 20px;text-align:center;color:var(--muted)}
-.radio{display:flex;gap:18px;flex-wrap:wrap}.radio label{font-weight:400;display:flex;gap:6px;align-items:center}
-code{font-family:var(--mono);font-size:13px;background:var(--accent-bg);padding:1px 5px;border-radius:5px}
+.hint{font-size:12px;color:var(--muted);margin-top:4px}
+.formbar{display:flex;gap:10px;margin-top:6px}
+.login{max-width:380px;margin:12vh auto 0;padding:32px 28px}
+.login .brand{flex-direction:column;justify-content:center;margin-bottom:20px;font-size:20px}
+.empty{padding:40px 20px;text-align:center;color:var(--muted)}
+.radio{display:flex;gap:18px;flex-wrap:wrap}.radio label{color:var(--ink);display:flex;gap:8px;align-items:center}
+code{font-family:var(--mono);font-size:12px;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+.scaninfo{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--ink-2);margin:-2px 0 12px}
+.warntext{color:var(--warn-text);font-weight:600}
+h2{font-size:15px;margin:22px 0 10px;font-weight:600;display:flex;align-items:center;gap:8px}
+h2 .count{font-size:11px;font-weight:600;color:var(--ink-2);background:var(--track);border-radius:999px;padding:1px 8px}
+.progress{height:8px;background:var(--track);border-radius:4px;overflow:hidden;margin:14px 0 8px}
+.progress span{display:block;height:100%;width:0;background:var(--accent);border-radius:4px;transition:width .4s}
+.badge.warn{background:var(--warn-bg);color:var(--warn-text);border-color:transparent;font-weight:600;font-family:var(--mono)}
+.badge.ok{background:var(--good-bg);color:var(--good-text);border-color:transparent;font-weight:600;font-family:var(--mono)}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:0 0 24px}
 """
 
@@ -751,6 +968,17 @@ ping();setInterval(ping,(+document.body.getAttribute('data-refresh')||60)*1000);
 })();
 """
 
+SCAN_JS = """
+(function(){var n=document.body.getAttribute('data-net');
+function poll(){fetch('api/scan/'+n,{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;})
+ .then(function(d){if(!d){setTimeout(poll,3000);return;}
+  if(d.total){document.getElementById('prog').style.width=(100*d.done/d.total).toFixed(1)+'%';
+   document.getElementById('progtext').textContent=d.phase+' \u2013 '+d.done+' of '+d.total+' addresses checked';}
+  if(d.state!=='running'){location.reload();return;}setTimeout(poll,1000);})
+ .catch(function(){setTimeout(poll,3000);});}
+poll();})();
+"""
+
 IMPORT_JS = """
 document.getElementById('file').addEventListener('change',function(ev){var f=ev.target.files[0];if(!f)return;
 var r=new FileReader();r.onload=function(){document.getElementById('csv').value=r.result;};r.readAsText(f);});
@@ -758,7 +986,7 @@ var r=new FileReader();r.onload=function(){document.getElementById('csv').value=
 
 
 def page(title, content, sess=None, networks=None, current_nid=None, body_attrs="", script="",
-         base="", ingress=False):
+         base="", ingress=False, section=""):
     header = ""
     flashes = ""
     if sess is not None:
@@ -782,9 +1010,10 @@ def page(title, content, sess=None, networks=None, current_nid=None, body_attrs=
         header = (
             '<header><div class="bar">'
             '<a class="brand" href="./">%s%s</a>%s<div class="spacer"></div>'
-            '<a class="btn" href="networks">%s Networks</a>'
+            '<a class="navlink" href="networks"%s>%s Networks</a>'
             '<span class="user">%s %s</span>%s'
-            '</div></header>' % (icon("logo", 22), e(APP_NAME), selector, icon("layers"),
+            '</div></header>' % (brand_mark(26), e(APP_NAME), selector,
+                                 ' aria-current="page"' if section == "networks" else "", icon("layers"),
                                  icon("user"), e(sess["user"]), signout))
         for kind, message in sess["flash"]:
             flashes += '<div class="flash %s">%s</div>' % (e(kind), message)
@@ -830,7 +1059,10 @@ ROUTES = [
     ("GET", r"/networks/(\w+)", "network_edit"),
     ("POST", r"/networks/save", "network_save"),
     ("POST", r"/networks/(\w+)/delete", "network_delete"),
+    ("POST", r"/net/(\w+)/scan", "scan_start"),
+    ("GET", r"/net/(\w+)/scan", "scan_view"),
     ("GET", r"/api/ping/(\w+)", "api_ping"),
+    ("GET", r"/api/scan/(\w+)", "api_scan"),
 ]
 PUBLIC = {"favicon", "login_form", "login"}
 
@@ -846,6 +1078,7 @@ class App:
         self.pinger = Pinger(cfg.get("ping", {}))
         self.sessions = Sessions(cfg.get("session_timeout_minutes", 60))
         self.throttle = LoginThrottle()
+        self.scanner = Scanner(self.store, self.pinger)
 
 
 APP = None
@@ -1002,9 +1235,10 @@ class Handler(BaseHTTPRequestHandler):
     def audit(self, text, *args):
         log.info("[%s@%s] " + text, self.sess["user"], self.client_address[0], *args)
 
-    def render(self, title, content, current_nid=None, body_attrs="", script="", status=200):
+    def render(self, title, content, current_nid=None, body_attrs="", script="", status=200, section=""):
         self.send_html(page(title, content, self.sess, APP.store.networks(), current_nid,
-                            body_attrs, script, base=self.base, ingress=self.ingress_mode), status)
+                            body_attrs, script, base=self.base, ingress=self.ingress_mode,
+                            section=section), status)
 
     def not_found(self):
         self.render("Not found", '<div class="card empty">This page does not exist. '
@@ -1031,7 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
             '<div class="field"><label for="p">Password</label>'
             '<input id="p" name="password" type="password" autocomplete="current-password" required></div>'
             '<button class="btn primary block" type="submit">Sign in</button></form></div>'
-            % (icon("logo", 26), e(APP_NAME), err, e(username)))
+            % (brand_mark(44), e(APP_NAME), err, e(username)))
         self.send_html(page("Sign in", body, base=self.base), status)
 
     def r_login_form(self):
@@ -1128,8 +1362,28 @@ class Handler(BaseHTTPRequestHandler):
                 % "".join(rows))
         else:
             table = ('<div class="card empty">No addresses assigned in this network yet.<br><br>'
-                     '<a class="btn primary" href="net/%s/host/new">%s Add address</a></div>'
-                     % (e(nid), icon("plus")))
+                     '<a class="btn primary" href="net/%s/host/new">%s Add address</a> %s</div>'
+                     % (e(nid), icon("plus"), self.scan_button(net, "btn")))
+
+        last_scan = ""
+        job = APP.scanner.status(nid)
+        if job and job["state"] == "running":
+            last_scan = ('<div class="scaninfo">%s Network scan running &hellip; '
+                         '<a href="net/%s/scan">Show progress</a></div>' % (icon("radar"), e(nid)))
+        elif net.get("last_scan"):
+            ls = net["last_scan"]
+            rep = ls["report"]
+            deviations = len(rep["mac_changed"]) + len(rep["mac_elsewhere"])
+            parts = ["%d added" % len(rep["added"])]
+            if rep["mac_filled"]:
+                parts.append("%d MAC filled in" % len(rep["mac_filled"]))
+            if deviations:
+                parts.append('<span class="warntext">%d deviation%s</span>' % (deviations, "" if deviations == 1 else "s"))
+            if rep["missing"]:
+                parts.append("%d not answering" % len(rep["missing"]))
+            last_scan = ('<div class="scaninfo">%s Last scan %s &middot; %s &middot; '
+                         '<a href="net/%s/scan">View report</a></div>'
+                         % (icon("radar"), e(fmt_dt(ls["time"])), " &middot; ".join(parts), e(nid)))
 
         content = (
             '<div class="head"><h1>%s</h1><span class="badge mono">%s</span>%s</div>'
@@ -1143,14 +1397,16 @@ class Handler(BaseHTTPRequestHandler):
             '<div class="toolbar"><div class="search">%s<input id="q" type="search" '
             'placeholder="Search IP, MAC, name, type, description" autocomplete="off"></div>'
             '<a class="btn primary" href="net/%s/host/new">%s Add address</a>'
+            '%s'
             '<a class="btn" href="net/%s/export.csv">%s Export CSV</a>'
-            '<a class="btn" href="net/%s/import">%s Import CSV</a></div>%s' % (
+            '<a class="btn" href="net/%s/import">%s Import CSV</a></div>%s%s' % (
                 e(net["name"]), e(net["cidr"]),
                 '<div class="sub">%s</div>' % e(net["description"]) if net.get("description") else "",
                 used, min(pct, 100), cap - used,
                 e(next_free) if next_free else "&mdash;",
-                icon("search"), e(nid), icon("plus"), e(nid), icon("download"), e(nid), icon("upload"),
-                table))
+                icon("search"), e(nid), icon("plus"), self.scan_button(net, "btn"),
+                e(nid), icon("download"), e(nid), icon("upload"),
+                last_scan, table))
         self.sess["last_net"] = nid
         refresh = int(APP.cfg.get("ping", {}).get("refresh_seconds", 60))
         self.render(net["name"], content, nid, 'data-net="%s" data-refresh="%d"' % (e(nid), refresh),
@@ -1319,7 +1575,7 @@ class Handler(BaseHTTPRequestHandler):
         content = ('<div class="head"><h1>Networks</h1><div class="spacer"></div>'
                    '<a class="btn primary" href="networks/new">%s Add network</a></div>%s'
                    % (icon("plus"), table))
-        self.render("Networks", content)
+        self.render("Networks", content, section="networks")
 
     def network_form(self, values, nid=None, errors=None, status=200):
         title = "Edit network" if nid else "Add network"
@@ -1339,7 +1595,7 @@ class Handler(BaseHTTPRequestHandler):
             '<a class="btn" href="networks">Cancel</a></div></form>' % (
                 title, error_box(errors), self.csrf_input(), e(nid or ""),
                 e(values.get("name", "")), e(values.get("cidr", "")), e(values.get("description", ""))))
-        self.render(title, content, status=status)
+        self.render(title, content, status=status, section="networks")
 
     def r_network_new(self):
         self.network_form({})
@@ -1368,7 +1624,145 @@ class Handler(BaseHTTPRequestHandler):
             self.audit("deleted network %s (%s) with %d addresses", net["name"], net["cidr"], count)
         self.redirect("/networks")
 
+    # -- network scan ----------------------------------------------------
+
+    def scan_button(self, net, css):
+        return ('<form class="inline" method="post" action="net/%s/scan" data-confirm="%s">%s'
+                '<button class="%s" type="submit">%s Scan network</button></form>'
+                % (e(net["id"]),
+                   e("Scan %s now? Every address is pinged once. New devices that answer "
+                     "are added automatically." % net["cidr"]),
+                   self.csrf_input(), css, icon("radar")))
+
+    def r_scan_start(self, nid):
+        net = APP.store.network(nid)
+        if not net:
+            return self.not_found()
+        n = ipaddress.IPv4Network(net["cidr"])
+        if not APP.scanner.available:
+            self.flash("error", "Network scan needs the <code>ping</code> command, which was not found.")
+            return self.redirect("/net/%s" % nid)
+        if capacity(n) > SCAN_MAX_ADDRESSES:
+            self.flash("error", "%s has %d addresses. Scans are limited to %d addresses (a /20)."
+                       % (e(net["cidr"]), capacity(n), SCAN_MAX_ADDRESSES))
+            return self.redirect("/net/%s" % nid)
+        job, started = APP.scanner.start(nid, self.sess["user"])
+        if not started:
+            self.flash("warn", "A scan of this network is already running.")
+        self.redirect("/net/%s/scan" % nid)
+
+    def _scan_table(self, nid, head, rows):
+        return ('<div class="card table-wrap"><table><thead><tr>%s<th></th></tr></thead><tbody>%s</tbody>'
+                '</table></div>' % ("".join("<th>%s</th>" % h for h in head), "".join(rows)))
+
+    def _edit_link(self, nid, hid):
+        if APP.store.host(nid, hid):
+            return ('<td class="actions"><a class="btn small" href="net/%s/host/%s" title="Edit" '
+                    'aria-label="Edit">%s</a></td>' % (e(nid), e(hid), icon("edit")))
+        return '<td class="actions muted">deleted</td>'
+
+    def r_scan_view(self, nid):
+        net = APP.store.network(nid)
+        if not net:
+            return self.not_found()
+        head = ('<div class="head"><h1>Network scan</h1><span class="badge mono">%s &middot; %s</span>'
+                '<div class="spacer"></div><a class="btn" href="net/%s">Back to list</a></div>'
+                % (e(net["name"]), e(net["cidr"]), e(nid)))
+        job = APP.scanner.status(nid)
+        if job and job["state"] == "running":
+            content = head + (
+                '<div class="card form"><strong>%s Scanning %s &hellip;</strong>'
+                '<div class="progress"><span id="prog" style="width:%.1f%%"></span></div>'
+                '<div class="hint" id="progtext">%s</div>'
+                '<p class="muted" style="font-size:14px;margin-bottom:0">You can leave this page; '
+                'the scan continues in the background.</p></div>'
+                % (icon("radar"), e(net["cidr"]),
+                   (100.0 * job["done"] / job["total"]) if job["total"] else 0,
+                   e("%s – %d of %d addresses checked" % (job["phase"], job["done"], job["total"]))))
+            return self.render("Network scan", content, nid, 'data-net="%s"' % e(nid), SCAN_JS)
+
+        error = ""
+        if job and job["state"] == "error":
+            error = '<div class="flash error">The last scan failed: %s</div>' % e(job["error"])
+        ls = net.get("last_scan")
+        if not ls:
+            content = head + error + (
+                '<div class="card empty">This network has not been scanned yet.<br><br>%s</div>'
+                % self.scan_button(net, "btn primary"))
+            return self.render("Network scan", content, nid)
+
+        rep = ls["report"]
+        deviations = len(rep["mac_changed"]) + len(rep["mac_elsewhere"])
+        summary = (
+            '<div class="scaninfo">Scanned %s by %s in %ss &middot; %s</div>'
+            '<div class="stats">'
+            '<div class="card stat"><div class="l">Answering</div><div class="v">%d</div></div>'
+            '<div class="card stat"><div class="l">Added</div><div class="v">%d</div></div>'
+            '<div class="card stat"><div class="l">Deviations</div><div class="v%s">%d</div></div>'
+            '<div class="card stat"><div class="l">Not answering</div><div class="v">%d</div></div>'
+            '</div>' % (e(fmt_dt(ls["time"])), e(ls["user"]), e(ls.get("duration", "")),
+                        self.scan_button(net, "btn small"),
+                        rep["alive"], len(rep["added"]), " warntext" if deviations else "", deviations,
+                        len(rep["missing"])))
+
+        sections = []
+        if rep["alive"] and not rep["macs_seen"]:
+            sections.append(
+                '<div class="flash warn">No MAC addresses could be read. The scan only sees MAC addresses '
+                'of devices in the same network segment as this server. In the Home Assistant app the '
+                'network is isolated, so MAC addresses have to be entered by hand.</div>')
+
+        if rep["mac_changed"]:
+            rows = ['<tr><td class="mono">%s</td><td><strong>%s</strong></td><td class="mono">%s</td>'
+                    '<td class="mono"><span class="badge warn">%s</span></td>%s</tr>'
+                    % (e(x["ip"]), e(x["name"]), e(x["stored"]), e(x["seen"]), self._edit_link(nid, x["id"]))
+                    for x in rep["mac_changed"]]
+            sections.append('<h2>MAC address changed <span class="count">%d</span></h2>'
+                            '<p class="hint">The device answering at this IP has a different MAC than the one '
+                            'on record: a replaced device, a different device using the IP, or a randomized '
+                            'Wi-Fi MAC. Nothing was changed.</p>%s'
+                            % (len(rows), self._scan_table(nid, ["IP address", "Name", "Stored MAC", "Seen MAC"], rows)))
+        if rep["mac_elsewhere"]:
+            rows = ['<tr><td class="mono">%s</td><td class="mono">%s</td><td>%s (%s)</td>%s</tr>'
+                    % (e(x["ip"]), e(x["mac"]), e(x["other_name"]), e(x["other_ip"]), self._edit_link(nid, x["id"]))
+                    for x in rep["mac_elsewhere"]]
+            sections.append('<h2>New address with a known MAC <span class="count">%d</span></h2>'
+                            '<p class="hint">A known device now also answers at a new IP (it may have moved '
+                            'or got a second address).</p>%s'
+                            % (len(rows), self._scan_table(nid, ["New IP", "MAC", "Already recorded as"], rows)))
+        if rep["added"]:
+            rows = ['<tr><td class="mono">%s</td><td class="mono">%s</td><td><strong>%s</strong></td>%s</tr>'
+                    % (e(x["ip"]), e(x["mac"]) or '<span class="muted">&mdash;</span>', e(x["name"]),
+                       self._edit_link(nid, x["id"])) for x in rep["added"]]
+            sections.append('<h2>Added <span class="count">%d</span></h2>'
+                            '<p class="hint">New devices were added with the name from DNS, or '
+                            '<code>unknown-&lt;ip&gt;</code> if none was found. Edit them to set name and type.</p>%s'
+                            % (len(rows), self._scan_table(nid, ["IP address", "MAC", "Name"], rows)))
+        if rep["mac_filled"]:
+            rows = ['<tr><td class="mono">%s</td><td><strong>%s</strong></td><td class="mono">'
+                    '<span class="badge ok">%s</span></td>%s</tr>'
+                    % (e(x["ip"]), e(x["name"]), e(x["mac"]), self._edit_link(nid, x["id"])) for x in rep["mac_filled"]]
+            sections.append('<h2>MAC address filled in <span class="count">%d</span></h2>%s'
+                            % (len(rows), self._scan_table(nid, ["IP address", "Name", "MAC"], rows)))
+        if rep["missing"]:
+            rows = ['<tr><td class="mono">%s</td><td>%s</td>%s</tr>'
+                    % (e(x["ip"]), e(x["name"]), self._edit_link(nid, x["id"])) for x in rep["missing"]]
+            sections.append('<h2>Recorded but not answering <span class="count">%d</span></h2>'
+                            '<p class="hint">These devices may be switched off, asleep, or block ping '
+                            '(e.g. Windows firewall, some phones). Nothing was changed.</p>%s'
+                            % (len(rows), self._scan_table(nid, ["IP address", "Name"], rows)))
+        if not sections:
+            sections.append('<div class="card empty">Everything matches: no new devices and no deviations.</div>')
+
+        self.render("Network scan", head + error + summary + "".join(sections), nid)
+
     # -- API -------------------------------------------------------------
+
+    def r_api_scan(self, nid):
+        job = APP.scanner.status(nid)
+        if not job:
+            return self.send_json({"state": "none"})
+        self.send_json({k: job[k] for k in ("state", "phase", "done", "total", "error")})
 
     def r_api_ping(self, nid):
         if not APP.store.network(nid):

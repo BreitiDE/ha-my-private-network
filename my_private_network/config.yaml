@@ -1,10 +1,10 @@
 name: My Private Network
-version: "1.1.0"
+version: "1.3.0"
 slug: my_private_network
 description: >-
   Manage the IP addresses of your networks: MAC, name, type, description,
-  ping status, multiple networks and CSV import/export.
-url: https://github.com/BreitiDE/ha-my-private-network
+  ping status, network scan, multiple networks and CSV import/export.
+url: https://github.com/YOUR_GITHUB_USER/ha-my-private-network
 arch:
   - aarch64
   - amd64
@@ -41,7 +41,6 @@ options:
     - Laptop
     - Phone
     - Tablet
-    - Smarthome
     - Printer
     - Camera
     - IoT
