@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "My Private Network"
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "tls": {"enabled": True, "cert_file": "cert.pem", "key_file": "key.pem"},
     "session_timeout_minutes": 60,
     "ping": {"enabled": True, "timeout_seconds": 1, "cache_seconds": 30, "workers": 64,
-             "refresh_seconds": 60},
+             "refresh_seconds": 60, "background_seconds": 300},
     "types": [
         "Router", "Switch", "Access Point", "Firewall", "Server", "NAS", "VM",
         "Container", "Client", "Laptop", "Phone", "Tablet", "Printer", "Camera",
@@ -629,16 +629,36 @@ SCAN_MAX_ADDRESSES = 4096
 DNS_TIMEOUT = 8
 
 class Pinger:
-    def __init__(self, cfg):
+    """Runs ping, caches results and remembers per IP when it last answered.
+
+    The history (last successful ping, last check, watched since) is kept in
+    ping_state.json next to the data file so it survives restarts.
+    """
+
+    SAVE_EVERY = 60
+
+    def __init__(self, cfg, state_path=None):
         self.timeout = max(1, int(cfg.get("timeout_seconds", 1)))
         self.cache_seconds = int(cfg.get("cache_seconds", 30))
+        self.background = max(0, int(cfg.get("background_seconds", 300)))
         self.binary = shutil.which("ping")
         self.available = bool(cfg.get("enabled", True)) and bool(self.binary)
         self.cache = {}
         self.lock = threading.Lock()
         self.pool = ThreadPoolExecutor(max_workers=max(1, int(cfg.get("workers", 64))))
+        self.state_path = state_path
+        self.state = {}
+        self.dirty = False
+        self.saved_at = 0.0
+        self.last_round = None
         if cfg.get("enabled", True) and not self.binary:
             log.warning("'ping' not found - reachability check disabled (dnf install iputils)")
+        if state_path and os.path.exists(state_path):
+            try:
+                with open(state_path, encoding="utf-8") as f:
+                    self.state = json.load(f).get("hosts", {})
+            except (OSError, ValueError) as ex:
+                log.warning("Cannot read %s (%s) - starting with empty ping history", state_path, ex)
 
     def _ping(self, ip):
         try:
@@ -649,6 +669,15 @@ class Pinger:
             return proc.returncode == 0
         except (OSError, subprocess.SubprocessError):
             return False
+
+    def _record(self, ip, ok, ts):
+        """Update cache and history. Caller holds self.lock."""
+        self.cache[ip] = (ts, ok)
+        entry = self.state.setdefault(ip, {"since": int(ts)})
+        entry["last_check"] = int(ts)
+        if ok:
+            entry["last_ok"] = int(ts)
+        self.dirty = True
 
     def check(self, ips):
         now = time.time()
@@ -663,14 +692,55 @@ class Pinger:
         for ip, ok in zip(todo, self.pool.map(self._ping, todo)):
             results[ip] = ok
             with self.lock:
-                self.cache[ip] = (time.time(), ok)
+                self._record(ip, ok, time.time())
+        self.save()
         return results
 
     def remember(self, results):
         now = time.time()
         with self.lock:
             for ip, ok in results.items():
-                self.cache[ip] = (now, ok)
+                self._record(ip, ok, now)
+        self.save()
+
+    def history(self, ips):
+        with self.lock:
+            return {ip: dict(self.state[ip]) for ip in ips if ip in self.state}
+
+    def save(self, force=False):
+        if not self.state_path:
+            return
+        with self.lock:
+            if not self.dirty or (not force and time.time() - self.saved_at < self.SAVE_EVERY):
+                return
+            snapshot = {"version": 1, "hosts": {ip: dict(v) for ip, v in self.state.items()}}
+            self.dirty = False
+            self.saved_at = time.time()
+        try:
+            save_json_atomic(self.state_path, snapshot, mode=0o600)
+        except OSError as ex:
+            log.warning("Cannot write %s: %s", self.state_path, ex)
+
+    def run_background(self, store, stop):
+        """Ping all recorded addresses every self.background seconds until stop is set."""
+        log.info("Background ping every %d s", self.background)
+        while not stop.wait(self.background if self.last_round else 5):
+            try:
+                with store.lock:
+                    ips = sorted({h["ip"] for h in store.data["hosts"]})
+                started = time.time()
+                results = dict(zip(ips, self.pool.map(self._ping, ips)))
+                with self.lock:
+                    for ip, ok in results.items():
+                        self._record(ip, ok, time.time())
+                    for ip in [ip for ip in self.state if ip not in results]:
+                        del self.state[ip]   # address no longer recorded anywhere
+                self.last_round = time.time()
+                self.save(force=True)
+                log.debug("Background ping: %d of %d answering (%.1f s)",
+                          sum(results.values()), len(results), time.time() - started)
+            except Exception:
+                log.exception("Background ping failed")
 
 
 def read_arp_table():
@@ -953,6 +1023,17 @@ dialog form.dlg{display:flex;flex-direction:column;max-height:calc(100vh - 34px)
 cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0}
 .icon-btn:hover{background:var(--hover);color:var(--ink)}
 [hidden]{display:none!important}
+.pingref{display:inline-flex;align-items:center;border-radius:4px;cursor:default;outline-offset:3px}
+.pingref .mono{text-decoration:underline dotted var(--axis);text-underline-offset:4px}
+.pingtip{position:absolute;z-index:30;width:max-content;max-width:min(400px,calc(100vw - 24px));background:var(--surface);
+border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);padding:10px 12px;font-size:13px;line-height:1.5;pointer-events:none}
+.pingtip .h{display:flex;align-items:center;gap:8px;font-weight:600;margin-bottom:6px}
+.pingtip .h .dot{margin:0}
+.pingtip dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;margin:0}
+.pingtip dt{color:var(--ink-2)}.pingtip dd{margin:0;font-variant-numeric:tabular-nums}
+.pingtip .ago{color:var(--muted);white-space:nowrap}
+.pingtip .t{white-space:nowrap}
+.pingtip .note{color:var(--ink-2);margin:0}
 """
 
 COMMON_JS = """
@@ -974,12 +1055,45 @@ tbl.querySelectorAll('th[data-sort]').forEach(function(th){th.addEventListener('
   if(num){x=+x;y=+y;}return (x>y?1:x<y?-1:0)*sd;});
  rows.forEach(function(r){tb.appendChild(r);});
  tbl.querySelectorAll('th').forEach(function(t){t.removeAttribute('data-dir');});th.setAttribute('data-dir',sd>0?'asc':'desc');});});
+var PD=null,tip=null,cur=null,shownAt=0;
 function ping(){fetch('api/ping/'+document.body.getAttribute('data-net'),{credentials:'same-origin'})
- .then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;var st=document.getElementById('reach');
-  if(!d.enabled){document.querySelectorAll('.dot').forEach(function(x){x.title='Ping check disabled';});if(st)st.textContent='n/a';return;}
-  var up=0,all=0;document.querySelectorAll('.dot[data-ip]').forEach(function(x){var v=d.results[x.getAttribute('data-ip')];all++;if(v)up++;
-   x.classList.toggle('up',v===true);x.classList.toggle('down',v===false);x.title=v?'Reachable (answers ping)':'No ping response';});
-  if(st)st.textContent=up+' / '+all;}).catch(function(){});}
+ .then(function(r){return r.ok?r.json():null;}).then(function(d){if(!d)return;PD=d;var st=document.getElementById('reach');
+  if(!d.enabled){if(st)st.textContent='n/a';}
+  else{var up=0,all=0;document.querySelectorAll('.dot[data-ip]').forEach(function(x){var v=d.results[x.getAttribute('data-ip')];all++;if(v)up++;
+   x.classList.toggle('up',v===true);x.classList.toggle('down',v===false);});
+   if(st)st.textContent=up+' / '+all;}
+  if(cur)showTip(cur);}).catch(function(){});}
+function p2(x){return(x<10?'0':'')+x;}
+function when(ts){var d=new Date(ts*1000),n=new Date(),hm=p2(d.getHours())+':'+p2(d.getMinutes());
+ var days=Math.round((new Date(n.getFullYear(),n.getMonth(),n.getDate())-new Date(d.getFullYear(),d.getMonth(),d.getDate()))/864e5);
+ if(days===0)return 'today '+hm;if(days===1)return 'yesterday '+hm;
+ return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate())+' '+hm;}
+function ago(ts){var s=Math.max(0,PD.now-ts);if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+' min ago';
+ if(s<86400)return Math.floor(s/3600)+' h ago';var dd=Math.floor(s/86400);return dd+(dd===1?' day ago':' days ago');}
+function esc(t){var e=document.createElement('span');e.textContent=t;return e.innerHTML;}
+function tipHtml(ip){
+ if(!PD)return '<p class="note">Checking &hellip;</p>';
+ if(!PD.enabled)return '<p class="note">Ping check is turned off.</p>';
+ var v=PD.results[ip],h=(PD.history||{})[ip]||{};
+ var head='<div class="h"><span class="dot '+(v?'up':'down')+'"></span>'+(v?'Reachable':'Not answering')+'</div>';
+ var last=h.last_ok?'<span class="t">'+esc(when(h.last_ok))+'</span> <span class="ago">('+ago(h.last_ok)+')</span>'
+  :'never'+(h.since?' <span class="ago">(watched since '+esc(when(h.since))+')</span>':'');
+ return head+'<dl><dt>Last successful ping</dt><dd>'+last+'</dd>'
+  +(h.last_check?'<dt>Last check</dt><dd>'+esc(when(h.last_check))+'</dd>':'')+'</dl>';}
+function showTip(el){
+ if(!tip){tip=document.createElement('div');tip.id='pingtip';tip.className='pingtip';tip.setAttribute('role','tooltip');document.body.appendChild(tip);}
+ if(cur!==el)shownAt=Date.now();cur=el;tip.innerHTML=tipHtml(el.getAttribute('data-ip'));tip.hidden=false;el.setAttribute('aria-describedby','pingtip');
+ var r=el.getBoundingClientRect(),w=tip.offsetWidth,x=Math.min(r.left,document.documentElement.clientWidth-w-12);
+ var y=r.bottom+6;if(y+tip.offsetHeight>window.innerHeight-8&&r.top-tip.offsetHeight-6>0)y=r.top-tip.offsetHeight-6;
+ tip.style.left=(Math.max(12,x)+window.scrollX)+'px';tip.style.top=(y+window.scrollY)+'px';}
+function hideTip(){if(cur)cur.removeAttribute('aria-describedby');cur=null;if(tip)tip.hidden=true;}
+tb.addEventListener('mouseover',function(ev){var el=ev.target.closest('.pingref');if(el&&el!==cur)showTip(el);});
+tb.addEventListener('mouseout',function(ev){var el=ev.target.closest('.pingref');if(el&&!el.contains(ev.relatedTarget)&&el!==document.activeElement)hideTip();});
+tb.addEventListener('focusin',function(ev){var el=ev.target.closest('.pingref');if(el)showTip(el);});
+tb.addEventListener('focusout',function(ev){if(ev.target.closest('.pingref'))hideTip();});
+document.addEventListener('click',function(ev){var el=ev.target.closest('.pingref');if(el){if(cur===el&&tip&&!tip.hidden&&Date.now()-shownAt>500&&ev.pointerType!=='mouse'){hideTip();}else showTip(el);}else hideTip();});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape')hideTip();});
+window.addEventListener('resize',hideTip);window.addEventListener('scroll',function(){if(cur)showTip(cur);},{passive:true});
 ping();setInterval(ping,(+document.body.getAttribute('data-refresh')||60)*1000);
 })();
 """
@@ -1124,7 +1238,13 @@ class App:
         self.cfg_path = cfg_path
         base = os.path.dirname(os.path.abspath(cfg_path))
         self.store = Store(rel_path(base, cfg["data_file"]), cfg.get("default_network"))
-        self.pinger = Pinger(cfg.get("ping", {}))
+        data_file = rel_path(base, cfg["data_file"])
+        self.pinger = Pinger(cfg.get("ping", {}),
+                             os.path.join(os.path.dirname(os.path.abspath(data_file)), "ping_state.json"))
+        self.stop = threading.Event()
+        if self.pinger.available and self.pinger.background:
+            threading.Thread(target=self.pinger.run_background, args=(self.store, self.stop),
+                             name="background-ping", daemon=True).start()
         self.sessions = Sessions(cfg.get("session_timeout_minutes", 60))
         self.throttle = LoginThrottle()
         self.scanner = Scanner(self.store, self.pinger)
@@ -1378,8 +1498,8 @@ class Handler(BaseHTTPRequestHandler):
             type_html = '<span class="badge">%s</span>' % e(h["type"]) if h.get("type") else ""
             rows.append(
                 '<tr data-search="%s">'
-                '<td class="nowrap" data-v="%d"><span class="dot" data-ip="%s" title="Checking&hellip;"></span>'
-                '<span class="mono">%s</span></td>'
+                '<td class="nowrap" data-v="%d"><span class="pingref" tabindex="0" data-ip="%s">'
+                '<span class="dot" data-ip="%s"></span><span class="mono">%s</span></span></td>'
                 '<td class="mono nowrap" data-v="%s">%s</td>'
                 '<td data-v="%s"><strong>%s</strong></td>'
                 '<td data-v="%s">%s</td>'
@@ -1390,7 +1510,7 @@ class Handler(BaseHTTPRequestHandler):
                 '<form class="inline" method="post" action="net/%s/host/%s/delete" data-confirm="%s">%s'
                 '<button class="btn small danger" type="submit" title="Delete" aria-label="Delete">%s</button>'
                 '</form></td></tr>' % (
-                    e(search), int(ipaddress.IPv4Address(h["ip"])), e(h["ip"]), e(h["ip"]),
+                    e(search), int(ipaddress.IPv4Address(h["ip"])), e(h["ip"]), e(h["ip"]), e(h["ip"]),
                     e(h.get("mac", "")), e(h.get("mac")) or '<span class="muted">&mdash;</span>',
                     e(h["name"].lower()), e(h["name"]),
                     e(h.get("type", "").lower()), type_html,
@@ -1871,8 +1991,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "not found"}, 404)
         if not APP.pinger.available:
             return self.send_json({"enabled": False})
-        results = APP.pinger.check([h["ip"] for h in APP.store.hosts(nid)])
-        self.send_json({"enabled": True, "results": results})
+        ips = [h["ip"] for h in APP.store.hosts(nid)]
+        results = APP.pinger.check(ips)
+        self.send_json({"enabled": True, "now": int(time.time()), "results": results,
+                        "history": APP.pinger.history(ips)})
 
 
 class Server(ThreadingHTTPServer):
@@ -1997,6 +2119,9 @@ def wait_for_shutdown(servers):
     while not stop.wait(3600):
         pass
     log.info("Shutting down")
+    if APP:
+        APP.stop.set()
+        APP.pinger.save(force=True)
     for httpd in servers:
         httpd.shutdown()
         httpd.server_close()
@@ -2023,6 +2148,7 @@ def addon_config(options, data_dir):
         "enabled": bool(options.get("ping_enabled", True)),
         "timeout_seconds": int(options.get("ping_timeout", 1)),
         "refresh_seconds": int(options.get("ping_refresh_seconds", 60)),
+        "background_seconds": int(options.get("ping_background_minutes", 5)) * 60,
     })
     cfg["session_timeout_minutes"] = int(options.get("session_timeout_minutes", 60))
     cfg["users"] = {}

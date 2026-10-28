@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+
+- Hovering the IP address or the ping dot shows when the device last answered a ping, when it was last checked, and how long ago that was
+- Devices that never answered show "never" and since when they are watched
+- Works with the mouse, the keyboard (Tab) and by tapping on phones and tablets
+- Background ping: all recorded addresses are checked every 5 minutes, also when nobody has the page open (option "Background ping", 0 = off)
+- Ping history is kept in `ping_state.json` next to the data and survives restarts (included in Home Assistant backups)
+
 ## 1.3.1
 
 - Adding and editing addresses opens an overlay on top of the list instead of a separate page

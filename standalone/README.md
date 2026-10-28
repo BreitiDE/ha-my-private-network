@@ -9,8 +9,10 @@ A small IP address manager with a web UI. One Python file, standard library only
 - HTTPS with a self-signed or your own certificate
 - Multiple networks (IPv4, /16 or smaller), selectable in the header
 - Per address: IP, MAC, name, type, description, last modified
-- Ping status dot in front of every IP (refreshed every 60 s)
+- Ping status dot in front of every IP (refreshed every 60 s); hover shows the last successful ping
+- Background ping of all recorded addresses every 5 minutes, history in `ping_state.json`
 - Search, sortable columns, "next free address"
+- Network scan: adds new devices (with MAC from the ARP table and name from reverse DNS) and reports deviations
 - CSV export and import (merge or replace, all-or-nothing validation)
 - Atomic writes with `data.json.bak` backup, audit log in `mpn.log`
 
@@ -65,6 +67,8 @@ Logs: `journalctl -u mpn -f` or `/opt/mpn/mpn.log`.
 | `ping.timeout_seconds` | `1` | Timeout per ping |
 | `ping.cache_seconds` | `30` | Ping results are cached this long |
 | `ping.workers` | `64` | Parallel pings |
+| `ping.refresh_seconds` | `60` | How often the open page updates the dots |
+| `ping.background_seconds` | `300` | Seconds between background pings of all recorded addresses, used for "last successful ping" (0 = off) |
 | `types` | Router, Switch, … | Suggestions for the Type field (free text is allowed) |
 | `users` | | Managed with the CLI, do not edit by hand |
 

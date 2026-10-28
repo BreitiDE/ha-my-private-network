@@ -21,6 +21,11 @@ configuration:
   ping_refresh_seconds:
     name: Ping refresh (seconds)
     description: How often the open page refreshes the ping status.
+  ping_background_minutes:
+    name: Background ping (minutes)
+    description: >-
+      How often all recorded addresses are pinged in the background, also when
+      nobody has the page open. Used for "last successful ping". 0 turns it off.
   session_timeout_minutes:
     name: Session timeout (minutes)
     description: Idle time until a user of the direct port has to sign in again.

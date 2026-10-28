@@ -34,6 +34,7 @@ Additional networks are managed in the app under **Networks**.
 | Ping status | Turns the ping dots on or off |
 | Ping timeout | Seconds to wait for a ping answer |
 | Ping refresh | How often the open page updates the dots |
+| Background ping | Minutes between background checks of all recorded addresses (0 = off) |
 | Session timeout | Idle minutes until users of the direct port must sign in again |
 | Direct access users | Users for the optional direct port |
 | HTTPS on the direct port | Uses the certificate from `/ssl` |
@@ -83,6 +84,8 @@ Networks larger than 4096 addresses (/20) cannot be scanned.
 All data is stored in `/data/data.json` inside the app, with the previous state in `data.json.bak`. Both are included in Home Assistant backups. You can also export each network as CSV.
 
 ## Ping status
+
+Move the mouse over an IP address or its dot (or tap it on a phone) to see when the device last answered a ping and when it was last checked. The app also pings all recorded addresses in the background every 5 minutes (option **Background ping**, 0 turns it off), so the time is meaningful even when nobody has the page open. The history is kept in `/data/ping_state.json`.
 
 The app pings from the Home Assistant host. Addresses in other VLANs only show green if Home Assistant can reach them (routing and firewall). Devices that do not answer ping (for example some phones in standby, or Windows machines with the default firewall) show red even when they are online.
 

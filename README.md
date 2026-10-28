@@ -4,6 +4,12 @@ A small IP address manager for your home network, as a Home Assistant app (forme
 
 ![Screenshot](docs/screenshot.png)
 
+<details><summary>Last successful ping on hover</summary>
+
+![Ping tooltip](docs/ping-tooltip.png)
+
+</details>
+
 <details><summary>Network scan report</summary>
 
 ![Scan report](docs/scan-report.png)
@@ -27,7 +33,7 @@ Supported architectures: `amd64`, `aarch64`.
 ## Features
 
 - IP, MAC, name, type, description and last change per address
-- Ping status dot per IP
+- Ping status dot per IP, with the time of the last successful ping on hover
 - Network scan: adds new devices automatically, reports changed MACs and missing devices
 - Multiple networks, search, sorting, next free address
 - CSV import/export
