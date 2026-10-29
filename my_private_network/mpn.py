@@ -45,7 +45,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "My Private Network"
-VERSION = "1.4.0"
+DONATE_URL = "https://paypal.me/breitide"
+DONATE_TIP = "Eine kleine Spende geben, Danke"
+VERSION = "1.4.1"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -930,6 +932,10 @@ header{background:var(--surface);border-bottom:1px solid var(--border)}
 .navlink{color:var(--ink-2);padding:8px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
 .navlink:hover{background:var(--hover);text-decoration:none}
 .navlink[aria-current=page]{background:var(--accent-soft);color:var(--accent-text);font-weight:600}
+.donate{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:8px;padding:0 12px;min-height:38px;
+background:var(--surface);color:var(--ink);font-weight:600;font-size:13px;white-space:nowrap}
+.donate .i{color:var(--accent);vertical-align:0}
+.donate:hover{background:var(--hover);text-decoration:none}
 .user{color:var(--ink-2);font-size:13px;display:flex;align-items:center;gap:6px}
 main{max-width:1280px;margin:0 auto;padding:20px 20px 48px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
@@ -1171,10 +1177,10 @@ def page(title, content, sess=None, networks=None, current_nid=None, body_attrs=
                        % (e(sess["csrf"]), icon("logout")))
         header = (
             '<header><div class="bar">'
-            '<a class="brand" href="./">%s%s</a>%s<div class="spacer"></div>'
+            '<a class="brand" href="./">%s%s</a>%s%s<div class="spacer"></div>'
             '<a class="navlink" href="networks"%s>%s Networks</a>'
             '<span class="user">%s %s</span>%s'
-            '</div></header>' % (brand_mark(26), e(APP_NAME), selector,
+            '</div></header>' % (brand_mark(26), e(APP_NAME), selector, donate_button(),
                                  ' aria-current="page"' if section == "networks" else "", icon("layers"),
                                  icon("user"), e(sess["user"]), signout))
         for kind, message in sess["flash"]:
@@ -1189,6 +1195,14 @@ def page(title, content, sess=None, networks=None, current_nid=None, body_attrs=
         '<footer>%s %s</footer><script>%s%s</script></body></html>'
         % (e(base), e(title), e(APP_NAME), CSS, body_attrs, header, flashes, content,
            e(APP_NAME), e(VERSION), COMMON_JS, script))
+
+
+def donate_button():
+    """Small PayPal donation link (same style as in My TrackView)."""
+    return ('<a class="donate" href="%s" target="_blank" rel="noopener noreferrer" title="%s" aria-label="%s">'
+            '<svg class="i" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 21s-7-4.4-9.3-8.6'
+            'C1.2 9.6 2.6 6 6 5.6c2-.2 3.4.9 4 2 .6-1.1 2-2.2 4-2 3.4.4 4.8 4 3.3 6.8C19 16.6 12 21 12 21z" '
+            'fill="currentColor"/></svg>PayPal</a>' % (e(DONATE_URL), e(DONATE_TIP), e(DONATE_TIP)))
 
 
 def error_box(errors):

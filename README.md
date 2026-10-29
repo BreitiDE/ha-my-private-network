@@ -77,6 +77,10 @@ standalone/                     systemd unit and guide for plain Linux hosts
 
 Home Assistant then offers the update.
 
+## Support
+
+☕ Gefällt dir die App? / Like the app? [Spenden / Donate via PayPal](https://paypal.me/breitide)
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

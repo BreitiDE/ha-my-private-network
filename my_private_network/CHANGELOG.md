@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Small PayPal donation button next to the network selector (opens paypal.me/breitide in a new tab)
+
 ## 1.4.0
 
 - Hovering the IP address or the ping dot shows when the device last answered a ping, when it was last checked, and how long ago that was
