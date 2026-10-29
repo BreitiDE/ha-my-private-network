@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.2
+
+- Donation button moved to the far right of the header and labelled "Unterstützen" / "Donate" (follows the browser language)
+- Hovering or focusing it shows a small overlay: "Danke für Deine Unterstützung, über eine kleine Spende würde ich mich freuen." (English: "Thank you for your support, I would be happy about a small donation.")
+- The link still opens paypal.me/breitide in a new tab
+
 ## 1.4.1
 
 - Small PayPal donation button next to the network selector (opens paypal.me/breitide in a new tab)

@@ -1,5 +1,5 @@
 name: My Private Network
-version: "1.4.1"
+version: "1.4.2"
 slug: my_private_network
 description: >-
   Manage the IP addresses of your networks: MAC, name, type, description,

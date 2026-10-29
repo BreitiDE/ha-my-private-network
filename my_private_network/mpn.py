@@ -46,8 +46,11 @@ from urllib.parse import parse_qs, urlparse
 
 APP_NAME = "My Private Network"
 DONATE_URL = "https://paypal.me/breitide"
-DONATE_TIP = "Eine kleine Spende geben, Danke"
-VERSION = "1.4.1"
+DONATE_TEXT = {
+    "de": ("Unterstützen", "Danke für Deine Unterstützung, über eine kleine Spende würde ich mich freuen."),
+    "en": ("Donate", "Thank you for your support, I would be happy about a small donation."),
+}
+VERSION = "1.4.2"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -932,10 +935,17 @@ header{background:var(--surface);border-bottom:1px solid var(--border)}
 .navlink{color:var(--ink-2);padding:8px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:6px}
 .navlink:hover{background:var(--hover);text-decoration:none}
 .navlink[aria-current=page]{background:var(--accent-soft);color:var(--accent-text);font-weight:600}
+.donate-wrap{position:relative;display:inline-flex;margin-left:auto}
 .donate{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:8px;padding:0 12px;min-height:38px;
 background:var(--surface);color:var(--ink);font-weight:600;font-size:13px;white-space:nowrap}
 .donate .i{color:var(--accent);vertical-align:0}
 .donate:hover{background:var(--hover);text-decoration:none}
+.donate-pop{display:none;position:absolute;right:0;top:calc(100% + 8px);z-index:40;width:max-content;max-width:min(280px,calc(100vw - 24px));
+background:var(--surface);color:var(--ink);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);
+padding:10px 12px;font-size:13px;line-height:1.45;pointer-events:none;white-space:normal}
+.donate-pop::before{content:"";position:absolute;right:18px;top:-6px;width:10px;height:10px;background:var(--surface);
+border-left:1px solid var(--border);border-top:1px solid var(--border);transform:rotate(45deg)}
+.donate-wrap:hover .donate-pop,.donate-wrap:focus-within .donate-pop{display:block}
 .user{color:var(--ink-2);font-size:13px;display:flex;align-items:center;gap:6px}
 main{max-width:1280px;margin:0 auto;padding:20px 20px 48px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px}
@@ -1043,6 +1053,10 @@ border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);paddin
 """
 
 COMMON_JS = """
+(function(){var w=document.querySelector('.donate-wrap');if(!w)return;
+var l=(navigator.language||'').toLowerCase().slice(0,2)==='de'?'de':'en';
+w.querySelector('.donate-label').textContent=w.getAttribute('data-'+l+'-label');
+w.querySelector('.donate-pop').textContent=w.getAttribute('data-'+l+'-text');})();
 document.addEventListener('submit',function(ev){var m=ev.target.getAttribute('data-confirm');
 if(m&&!confirm(m))ev.preventDefault();});
 """
@@ -1154,7 +1168,7 @@ var r=new FileReader();r.onload=function(){document.getElementById('csv').value=
 
 
 def page(title, content, sess=None, networks=None, current_nid=None, body_attrs="", script="",
-         base="", ingress=False, section=""):
+         base="", ingress=False, section="", lang="en"):
     header = ""
     flashes = ""
     if sess is not None:
@@ -1177,12 +1191,12 @@ def page(title, content, sess=None, networks=None, current_nid=None, body_attrs=
                        % (e(sess["csrf"]), icon("logout")))
         header = (
             '<header><div class="bar">'
-            '<a class="brand" href="./">%s%s</a>%s%s<div class="spacer"></div>'
+            '<a class="brand" href="./">%s%s</a>%s<div class="spacer"></div>'
             '<a class="navlink" href="networks"%s>%s Networks</a>'
-            '<span class="user">%s %s</span>%s'
-            '</div></header>' % (brand_mark(26), e(APP_NAME), selector, donate_button(),
+            '<span class="user">%s %s</span>%s%s'
+            '</div></header>' % (brand_mark(26), e(APP_NAME), selector,
                                  ' aria-current="page"' if section == "networks" else "", icon("layers"),
-                                 icon("user"), e(sess["user"]), signout))
+                                 icon("user"), e(sess["user"]), signout, donate_button(lang)))
         for kind, message in sess["flash"]:
             flashes += '<div class="flash %s">%s</div>' % (e(kind), message)
         sess["flash"] = []
@@ -1197,12 +1211,21 @@ def page(title, content, sess=None, networks=None, current_nid=None, body_attrs=
            e(APP_NAME), e(VERSION), COMMON_JS, script))
 
 
-def donate_button():
-    """Small PayPal donation link (same style as in My TrackView)."""
-    return ('<a class="donate" href="%s" target="_blank" rel="noopener noreferrer" title="%s" aria-label="%s">'
-            '<svg class="i" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 21s-7-4.4-9.3-8.6'
-            'C1.2 9.6 2.6 6 6 5.6c2-.2 3.4.9 4 2 .6-1.1 2-2.2 4-2 3.4.4 4.8 4 3.3 6.8C19 16.6 12 21 12 21z" '
-            'fill="currentColor"/></svg>PayPal</a>' % (e(DONATE_URL), e(DONATE_TIP), e(DONATE_TIP)))
+def donate_button(lang="en"):
+    """Donation link (PayPal) at the far right of the header with a small thank-you overlay.
+
+    The label follows the browser language: German for "de", otherwise English.
+    The page script switches it again if navigator.language differs from Accept-Language.
+    """
+    label, text = DONATE_TEXT.get(lang, DONATE_TEXT["en"])
+    return ('<span class="donate-wrap" data-de-label="%s" data-de-text="%s" data-en-label="%s" data-en-text="%s">'
+            '<a class="donate" href="%s" target="_blank" rel="noopener noreferrer" aria-describedby="donate-pop">'
+            '<svg class="i" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">'
+            '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z" fill="currentColor"/></svg>'
+            '<span class="donate-label">%s</span></a>'
+            '<span class="donate-pop" id="donate-pop" role="tooltip">%s</span></span>'
+            % (e(DONATE_TEXT["de"][0]), e(DONATE_TEXT["de"][1]), e(DONATE_TEXT["en"][0]), e(DONATE_TEXT["en"][1]),
+               e(DONATE_URL), e(label), e(text)))
 
 
 def error_box(errors):
@@ -1418,10 +1441,14 @@ class Handler(BaseHTTPRequestHandler):
     def audit(self, text, *args):
         log.info("[%s@%s] " + text, self.sess["user"], self.client_address[0], *args)
 
+    def browser_lang(self):
+        first = (self.headers.get("Accept-Language") or "").split(",")[0].strip().lower()
+        return "de" if first.startswith("de") else "en"
+
     def render(self, title, content, current_nid=None, body_attrs="", script="", status=200, section=""):
         self.send_html(page(title, content, self.sess, APP.store.networks(), current_nid,
                             body_attrs, script, base=self.base, ingress=self.ingress_mode,
-                            section=section), status)
+                            section=section, lang=self.browser_lang()), status)
 
     def not_found(self):
         self.render("Not found", '<div class="card empty">This page does not exist. '

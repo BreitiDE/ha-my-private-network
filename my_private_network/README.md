@@ -4,7 +4,7 @@ IP address management for your home network, inside Home Assistant.
 
 ![Supports aarch64][aarch64-shield] ![Supports amd64][amd64-shield]
 
-Keep track of which IP belongs to which device: MAC address, name, type, description and last change, with a live ping status, several networks and CSV import/export. Opens in the Home Assistant sidebar.
+Keep track of which IP belongs to which device: MAC address, name, type, description and last change, with a live ping status, a network scan that adds new devices, several networks and CSV import/export. Opens in the Home Assistant sidebar.
 
 See the **Documentation** tab for details.
 
