@@ -50,7 +50,7 @@ DONATE_TEXT = {
     "de": ("Unterstützen", "Danke für Deine Unterstützung, über eine kleine Spende würde ich mich freuen."),
     "en": ("Donate", "Thank you for your support, I would be happy about a small donation."),
 }
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_BODY = 5 * 1024 * 1024
 COOKIE_NAME = "mpn_session"
@@ -926,7 +926,8 @@ a{color:var(--accent-text);text-decoration:none}
 a:hover{text-decoration:underline}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .i{vertical-align:-3px;flex-shrink:0}
-header{background:var(--surface);border-bottom:1px solid var(--border)}
+html{scroll-padding-top:84px}
+header{background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20}
 .bar{max-width:1280px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:18px;color:var(--ink)}
 .brand:hover{text-decoration:none}
@@ -1050,6 +1051,20 @@ border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);paddin
 .pingtip .ago{color:var(--muted);white-space:nowrap}
 .pingtip .t{white-space:nowrap}
 .pingtip .note{color:var(--ink-2);margin:0}
+@media (max-width:700px){
+html{scroll-padding-top:150px}
+.bar{padding:8px 16px;gap:8px 10px}
+.brand{font-size:17px;order:0}
+.donate-wrap{order:1}
+.donate{min-height:32px;padding:0 10px}
+.bar>select{order:2;flex:1 1 100%;min-height:36px}
+.bar>.spacer{display:none}
+.bar>.navlink,.bar>.user,.bar>form.inline{order:3}
+.bar>.navlink{padding:6px 10px}
+.bar>.user{margin-left:auto}
+.bar>form.inline .btn{min-height:32px;padding:5px 10px}
+main{padding:16px 16px 40px}
+}
 """
 
 COMMON_JS = """

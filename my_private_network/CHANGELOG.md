@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.3
+
+- The header (logo, network selector, menu, user and the donation button) stays at the top while scrolling
+- Compact header on phones: logo and donation button, network selector, then menu, user and sign out
+
 ## 1.4.2
 
 - Donation button moved to the far right of the header and labelled "Unterstützen" / "Donate" (follows the browser language)

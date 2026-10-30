@@ -52,8 +52,6 @@ python3 mpn.py --gen-cert             # self-signed certificate (needs openssl)
 python3 mpn.py                        # https://<host>:8443
 ```
 
-A systemd unit and an install guide for Rocky Linux / RHEL are in [standalone/](standalone/).
-
 ## Repository layout
 
 ```
@@ -64,9 +62,7 @@ my_private_network/
   mpn.py                        The application
   translations/                 Option labels (en, de)
   DOCS.md, README.md, CHANGELOG.md, icon.png, logo.png
-standalone/                     systemd unit and guide for plain Linux hosts
-.github/workflows/check.yaml    Checks and test build (both architectures) on every push
-.github/check_app.py            Config/translation consistency check (run locally too)
+docs/                           Screenshots for this README
 ```
 
 ## Releasing a new version
